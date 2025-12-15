@@ -1,0 +1,16 @@
+coyo_subset:
+  inherit_from: dataset_base
+  type: ImageVariationDataset
+  data_root: /data/coyo/images
+  meta_path: /data/coyo/metadata.json
+  image_size: 256
+  transform:
+    name: default_train
+    image_size: 256
+  batch_size: 8
+  num_workers: 4
+  shuffle: true
+  pin_memory: true
+  use_text: true
+  context_mix: image_text
+  num_variations: 4

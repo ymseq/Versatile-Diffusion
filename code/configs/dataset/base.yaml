@@ -1,0 +1,12 @@
+dataset_base:
+  type: CocoCaptionDataset
+  data_root: /path/to/images
+  image_size: 256
+  transform:
+    name: default_train
+    image_size: 256
+  batch_size: 4
+  num_workers: 4
+  shuffle: true
+  pin_memory: true
+  use_text: true

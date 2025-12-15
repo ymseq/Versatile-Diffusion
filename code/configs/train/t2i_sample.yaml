@@ -1,0 +1,25 @@
+train:
+  dataset: DATASET(coco)
+  batch_size_per_gpu: 8
+  dataset_num_workers_per_gpu: 8
+  log_dir: logs/train_t2i
+  step_type: iter
+  step_num: 100000
+  log_every: 100
+  ckpt_every: 500
+  eval_every: 1000
+  eval_start: 0
+  save_init_model: false
+  skip_partial_batch: false
+
+eval:
+  dataset: DATASET(coyo_subset)
+  batch_size_per_gpu: 4
+  dataset_num_workers_per_gpu: 4
+  log_dir: logs/eval_t2i
+  log_display: 10
+  output_result: false
+  evaluator:
+    type: t2i
+    fid_stats_path: /data/stats/coco_val.npz
+    clip_model_name: ViT-B-32

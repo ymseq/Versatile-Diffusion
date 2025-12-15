@@ -181,14 +181,16 @@ class dataset_cfg_bank(object):
 
         cfg = self.cfg_bank[name]
         cfg.name = name
-        if cfg.get('super_cfg', None) is None:
+        super_cfg_name = cfg.get('inherit_from', cfg.get('super_cfg', None))
+        if super_cfg_name is None:
             cfg = cfg_solve(cfg, cfg)
             self.cfg_bank[name] = cfg
             return copy.deepcopy(cfg)
 
-        super_cfg = self.__call__(cfg.super_cfg)
+        super_cfg = self.__call__(super_cfg_name)
         super_cfg.update(cfg)
         cfg = super_cfg
+        cfg.inherit_from = None
         cfg.super_cfg = None
         try:
             delete = cfg.pop('delete')
@@ -203,11 +205,10 @@ class dataset_cfg_bank(object):
         return copy.deepcopy(cfg)
 
     def get_yaml_path(self, name):
-        if name.find('laion2b')==0:
-            return osp.join(
-                self.cfg_dir, 'laion2b.yaml')
-        else:
-            raise ValueError
+        candidate = osp.join(self.cfg_dir, name+'.yaml')
+        if osp.isfile(candidate):
+            return candidate
+        raise ValueError(f'No dataset config found for {name}')
 
 class experiment_cfg_bank(object):
     def __init__(self):

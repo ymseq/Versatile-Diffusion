@@ -1,0 +1,14 @@
+eval:
+  dataset: DATASET(coco)
+  batch_size_per_gpu: 4
+  dataset_num_workers_per_gpu: 4
+  log_dir: logs/eval_i2t
+  log_display: 20
+  output_result: false
+  evaluator:
+    type: i2t
+    reference_path: /data/coco/annotations/captions_val2017.json
+    clip_model_name: ViT-B-32
+  dataset:
+    sampler: default_eval
+    pin_memory: true

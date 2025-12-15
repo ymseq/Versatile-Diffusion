@@ -1,0 +1,13 @@
+laion2b_subset:
+  inherit_from: dataset_base
+  type: LaionSubsetDataset
+  data_root: /data/laion2b/
+  meta_path: /data/laion2b/metadata.tsv
+  image_size: 256
+  preprocess:
+    name: default_train
+    image_size: 256
+  batch_size: 16
+  num_workers: 8
+  shuffle: true
+  pin_memory: true
