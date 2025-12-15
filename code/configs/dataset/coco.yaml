@@ -1,0 +1,12 @@
+coco:
+  inherit_from: dataset_base
+  type: CocoCaptionDataset
+  data_root: /data/coco/images
+  ann_path: /data/coco/annotations/captions_train2017.json
+  transform:
+    name: default_train
+    image_size: 256
+  batch_size: 8
+  num_workers: 8
+  shuffle: true
+  pin_memory: true

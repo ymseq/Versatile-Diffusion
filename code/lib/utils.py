@@ -1,6 +1,7 @@
 import jittor as jt
 import jittor.nn as nn
 
+import torch
 import torch.backends.cudnn as cudnn
 # cudnn.enabled = True
 # cudnn.benchmark = True
