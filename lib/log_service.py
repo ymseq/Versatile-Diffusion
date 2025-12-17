@@ -5,7 +5,8 @@ import os.path as osp
 import shutil
 import copy
 import torch
-# import torch.nn as nn
+import torch.nn as nn
+import jittor as jt
 import torch.distributed as dist
 from .cfg_holder import cfg_unique_holder as cfguh
 from . import sync
@@ -149,6 +150,9 @@ def torch_to_numpy(*argv):
 
     if isinstance(data, torch.Tensor):
         return data.to('cpu').detach().numpy()
+    
+    if isinstance(data, jt.Var):
+        return data.numpy()
 
     elif isinstance(data, (list, tuple)):
         out = []

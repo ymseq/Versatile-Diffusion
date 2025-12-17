@@ -1,12 +1,9 @@
-from email.policy import strict
 import torch
-import torchvision.models
-import os.path as osp
 import copy
 from ...log_service import print_log 
 from .utils import \
-    get_total_param, get_total_param_sum, \
-    get_unit
+    get_total_param, get_total_param_sum
+    # get_unit
 
 def singleton(class_):
     instances = {}
@@ -16,19 +13,19 @@ def singleton(class_):
         return instances[class_]
     return getinstance
 
-def preprocess_model_args(args):
-    # If args has layer_units, get the corresponding
-    #     units.
-    # If args get backbone, get the backbone model.
-    args = copy.deepcopy(args)
-    if 'layer_units' in args:
-        layer_units = [
-            get_unit()(i) for i in args.layer_units
-        ]
-        args.layer_units = layer_units
-    if 'backbone' in args:
-        args.backbone = get_model()(args.backbone)
-    return args
+# def preprocess_model_args(args):
+#     # If args has layer_units, get the corresponding
+#     #     units.
+#     # If args get backbone, get the backbone model.
+#     args = copy.deepcopy(args)
+#     if 'layer_units' in args:
+#         layer_units = [
+#             get_unit()(i) for i in args.layer_units
+#         ]
+#         args.layer_units = layer_units
+#     if 'backbone' in args:
+#         args.backbone = get_model()(args.backbone)
+#     return args
 
 @singleton
 class get_model(object):
@@ -45,20 +42,19 @@ class get_model(object):
         t = cfg.type
 
         # the register is in each file
-        if t.find('ldm')==0:
-            from .. import ldm
-        elif t=='autoencoderkl':
-            from .. import autokl
+        if t=='autoencoderkl':
+            from ..model_torch import autokl
         elif (t.find('clip')==0) or (t.find('openclip')==0):
-            from .. import clip
+            from ..model_torch import clip
         elif t.find('vd')==0:
-            from .. import vd
+            from ..model_jittor import vd
         elif t.find('openai_unet')==0:
-            from .. import openaimodel
+            from ..model_jittor import openaimodel
         elif t.find('optimus')==0:
-            from .. import optimus
+            from ..model_torch import optimus
 
-        args = preprocess_model_args(cfg.args)
+        # args = preprocess_model_args(cfg.args)
+        args = cfg.args
         net = self.model[t](**args)
 
         map_location = cfg.get('map_location', 'cpu')
