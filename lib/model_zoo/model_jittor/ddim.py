@@ -134,8 +134,6 @@ class DDIMSampler(object):
     def register_buffer(self, name, attr):
         # buffers should always be jt.Var and stop_grad
         attr = _to_jt(attr, dtype=jt.float32, stop_grad=True)
-        if hasattr(self, name):
-            raise ValueError(f"Trying to register {name} but {name} already exists!")
         setattr(self, name, attr)
 
     def make_schedule(self, ddim_num_steps, ddim_discretize="uniform", ddim_eta=0., verbose=True):

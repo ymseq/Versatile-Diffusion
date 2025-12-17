@@ -393,13 +393,26 @@ class VD_v2_0(nn.Module):
     # torch hub adapters (inference-only)
     # -----------------------
     def vae_encode(self, x, which, **kwargs):
-        return self.torch_hub.vae_encode(x, which, **kwargs)
+        z = self.torch_hub.vae_encode(x, which, **kwargs)
+        if self.latent_scale_factor is not None:
+            if self.latent_scale_factor.get(which, None) is not None:
+                scale = self.latent_scale_factor[which]
+                return scale * z
+        return z
 
     def vae_decode(self, z, which, **kwargs):
-        return self.torch_hub.vae_decode(z, which, **kwargs)
+        if self.latent_scale_factor is not None:
+            if self.latent_scale_factor.get(which, None) is not None:
+                scale = self.latent_scale_factor[which]
+                z = 1./scale * z
+        x = self.torch_hub.vae_decode(z, which, **kwargs)
+        return x
 
     def ctx_encode(self, x, which, **kwargs):
-        return self.torch_hub.ctx_encode(x, which, **kwargs)
+        if which.find('vae_') == 0:
+            return self.vae_encode(x, which[4:], **kwargs)
+        else:
+            return self.torch_hub.ctx_encode(x, which, **kwargs)
 
 
     # -----------------------
@@ -590,17 +603,17 @@ class VD_v2_0(nn.Module):
         missing = []
         unexpected = []
 
-        # 1) buffers
-        for n in self._BUFFER_NAMES:
-            if n in sd:
-                v = jt.array(_to_numpy_any(sd[n])).astype(self.dtype)
-                if (n != "logvar") or (not self.learn_logvar):
-                    v.stop_grad()
-                setattr(self, n, v)
-                loaded.add(n)
-            else:
-                if strict:
-                    missing.append(n)
+        # # 1) buffers
+        # for n in self._BUFFER_NAMES:
+        #     if n in sd:
+        #         v = jt.array(_to_numpy_any(sd[n])).astype(self.dtype)
+        #         if (n != "logvar") or (not self.learn_logvar):
+        #             v.stop_grad()
+        #         setattr(self, n, v)
+        #         loaded.add(n)
+        #     else:
+        #         if strict:
+        #             missing.append(n)
 
         # 2) diffuser params by prefix
         for dname, dmod in self.diffuser.items():
@@ -623,5 +636,7 @@ class VD_v2_0(nn.Module):
         for k in sd.keys():
             if k not in loaded and not any(str(k).startswith(f"diffuser.{dn}.") for dn in self.diffuser.keys()):
                 unexpected.append(k)
-
+                
+        print_log({"missing_keys": missing, "unexpected_keys": unexpected})
+        
         return {"missing_keys": missing, "unexpected_keys": unexpected}
