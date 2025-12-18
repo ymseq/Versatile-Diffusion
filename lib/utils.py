@@ -1,143 +1,53 @@
-
+# exec_and_stage.py (Jittor MPI version; keep original class names)
 import os
 import os.path as osp
-import time
 import timeit
 import numpy as np
-import importlib
+
+import torch  # keep torch for frozen VAE/CLIP etc.
+
+import jittor as jt
 
 from .cfg_holder import cfg_unique_holder as cfguh
-from .data_factory import (
-    get_dataset, collate,
-    get_loader,
-    get_transform,
-    get_estimator,
-    get_formatter,
-    get_sampler,
-)
+from .data_factory import get_dataset, collate, get_sampler
 from .model_zoo import get_model, get_optimizer, get_scheduler
 from .log_service import print_log, distributed_log_manager
+from .evaluator import get_evaluator
+from . import sync
 
-# ------------------------
-# backend detection utils
-# ------------------------
 
-def _is_torch_tensor(x):
-    try:
-        import torch
-        return isinstance(x, torch.Tensor)
-    except Exception:
-        return False
+def _is_jittor_module(net) -> bool:
+    return (jt is not None) and hasattr(jt, "Module") and isinstance(net, jt.Module)
 
-def _is_torch_module(x):
-    try:
-        import torch.nn as nn
-        return isinstance(x, nn.Module)
-    except Exception:
-        return False
 
-def _is_jittor_var(x):
-    try:
-        import jittor as jt
-        return isinstance(x, jt.Var)
-    except Exception:
-        return False
+def _is_torch_module(net) -> bool:
+    import torch.nn as nn
+    return isinstance(net, nn.Module)
 
-def _is_jittor_module(x):
-    # Jittor Module class
-    try:
-        import jittor.nn as jnn
-        return isinstance(x, jnn.Module)
-    except Exception:
-        return False
 
-def to_numpy(data):
+def _jt_safe_save(obj, path: str):
     """
-    Torch Tensor / Jittor Var / nested(list/tuple/dict) -> numpy
+    Everyone calls this function; it writes only on rank0 but does not cause mismatch,
+    because it's pure python branching + jt.safepickle inside both ranks? -> we avoid that:
+    - use jt.single_process_scope if available
     """
-    if _is_torch_tensor(data):
-        import torch
-        return data.detach().cpu().numpy()
-    if _is_jittor_var(data):
-        return data.numpy()
+    if jt is None:
+        raise RuntimeError("Jittor not available")
 
-    if isinstance(data, (list, tuple)):
-        return [to_numpy(x) for x in data]
-    if isinstance(data, dict):
-        return {k: to_numpy(v) for k, v in data.items()}
-    return data
+    # best effort: single_process_scope exists in jittor mpi docs
+    if hasattr(jt, "single_process_scope"):
+        @jt.single_process_scope()
+        def _do():
+            # NOTE: inside this scope, MPI is disabled, so safe to call jt APIs
+            jt.safepickle(obj, path)
+        _do()
+    else:
+        # fallback: all ranks save to different files (only for emergency)
+        gr = sync.get_rank("global")
+        jt.safepickle(obj, path + f".rank{gr}")
 
-def set_global_seed(seed: int):
-    if seed is None:
-        return
-    np.random.seed(seed)
-    try:
-        import random
-        random.seed(seed)
-    except Exception:
-        pass
-    try:
-        import torch
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-    except Exception:
-        pass
-    try:
-        import jittor as jt
-        jt.set_global_seed(seed)
-    except Exception:
-        pass
-
-def move_to_device(net, device_id: int = 0):
-    # Torch
-    if _is_torch_module(net):
-        import torch
-        if torch.cuda.is_available():
-            return net.cuda(device_id)
-        return net
-
-    # Jittor
-    if _is_jittor_module(net):
-        try:
-            import jittor as jt
-            jt.flags.use_cuda = 1
-        except Exception:
-            pass
-        return net
-
-    return net
-
-def save_state_dict(net, path: str):
-    try:
-        import torch
-        if isinstance(net, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
-            net = net.module
-    except Exception:
-        pass
-
-    # torch
-    if _is_torch_module(net):
-        import torch
-        torch.save(net.state_dict(), path)
-        return
-
-    # jittor
-    if _is_jittor_module(net):
-        import jittor as jt
-        sd = net.state_dict()
-        jt.save(sd, path)
-        return
-
-    raise TypeError(f"Unknown model type for saving: {type(net)}")
-
-
-# ------------------------
-# stages
-# ------------------------
 
 class train_stage(object):
-
     def __init__(self):
         self.nested_eval_stage = None
         self.rv_keep = None
@@ -146,22 +56,25 @@ class train_stage(object):
         return (self.rv_keep is None) or (x > self.rv_keep)
 
     def set_model(self, net, mode):
-        # Torch/Jittor 都有 train()/eval() 习惯接口（jittor.nn.Module 也有）
+        if hasattr(net, mode):
+            return getattr(net, mode)()
+        # torch style
         if mode == 'train':
             return net.train()
         elif mode == 'eval':
             return net.eval()
-        raise ValueError
+        else:
+            raise ValueError
 
     def __call__(self, **paras):
         cfg = cfguh().cfg
         cfgt = cfg.train
-        logm = distributed_log_manager()  # 单卡下内部不会 all_reduce
+        logm = distributed_log_manager()
+
         epochn, itern, samplen = 0, 0, 0
 
         step_type = cfgt.get('step_type', 'iter')
         assert step_type in ['epoch', 'iter', 'sample']
-
         step_num      = cfgt.get('step_num', None)
         gradacc_every = cfgt.get('gradacc_every', 1)
         log_every     = cfgt.get('log_every', None)
@@ -169,7 +82,6 @@ class train_stage(object):
         eval_start    = cfgt.get('eval_start', 0)
         eval_every    = cfgt.get('eval_every', None)
 
-        # resume_step（你原逻辑保留）
         if paras.get('resume_step', None) is not None:
             resume_step = paras['resume_step']
             assert step_type == resume_step['type']
@@ -179,44 +91,51 @@ class train_stage(object):
             del paras['resume_step']
 
         trainloader = paras['trainloader']
-        optimizer   = paras.get('optimizer', None)
-        scheduler   = paras.get('scheduler', None)
+        optimizer   = paras['optimizer']
+        scheduler   = paras['scheduler']
         net         = paras['net']
 
+        GRANK, LRANK, NRANK = sync.get_rank('all')
+        GWSIZE, LWSIZE, NODES = sync.get_world_size('all')
+
         weight_path = osp.join(cfgt.log_dir, 'weight')
-        if (not osp.isdir(weight_path)):
-            os.makedirs(weight_path, exist_ok=True)
-        if cfgt.get('save_init_model', False):
+        if (GRANK == 0) and (not osp.isdir(weight_path)):
+            os.makedirs(weight_path)
+        # sync before any save so all ranks see the directory
+        sync.nodewise_sync().barrier()
+
+        # init save (all ranks enter; actual save handled safely inside)
+        if cfgt.save_init_model:
             self.save(net, is_init=True, step=0, optimizer=optimizer)
 
         epoch_time = timeit.default_timer()
         end_flag = False
-        net.train()
+        net = self.set_model(net, 'train')
 
         while True:
             if step_type == 'epoch':
                 lr = scheduler[epochn] if scheduler is not None else None
 
             for batch in trainloader:
-                # batch size 推断（保持你原逻辑）
-                if not isinstance(batch[0], list):
-                    bs = batch[0].shape[0]
+                # batch size inference
+                b0 = batch[0]
+                if isinstance(b0, list):
+                    bs = len(b0)
                 else:
-                    bs = len(batch[0])
+                    bs = int(getattr(b0, "shape", [len(b0)])[0])
 
-                if cfgt.get('skip_partial_batch', False) and (bs != cfgt.batch_size_per_gpu):
+                if cfgt.skip_partial_batch and (bs != cfgt.batch_size_per_gpu):
                     continue
 
                 itern_next = itern + 1
-                samplen_next = samplen + bs  # 单卡不乘 world size
+                samplen_next = samplen + bs * GWSIZE
 
+                grad_update = True
                 if step_type == 'iter':
                     lr = scheduler[itern // gradacc_every] if scheduler is not None else None
                     grad_update = (itern % gradacc_every) == (gradacc_every - 1)
                 elif step_type == 'sample':
                     lr = scheduler[samplen] if scheduler is not None else None
-                    grad_update = True
-                else:
                     grad_update = True
 
                 paras_new = self.main(
@@ -230,15 +149,12 @@ class train_stage(object):
                     **paras
                 )
 
-                if paras_new is None:
-                    paras_new = {}
-                paras.update(paras_new)
+                if paras_new is not None:
+                    paras.update(paras_new)
 
-                # 记录 log_info
-                if 'log_info' in paras:
-                    logm.accumulate(bs, **paras['log_info'])
+                logm.accumulate(bs, **paras.get('log_info', {}))
 
-                # log
+                # -------- log (all ranks compute reduce; only local rank0 prints) --------
                 display_flag = False
                 if log_every is not None:
                     display_i = (itern // log_every) != (itern_next // log_every)
@@ -251,31 +167,37 @@ class train_stage(object):
                     logm.clear()
                     print_log(console_info)
 
-                # eval（单卡：直接执行）
+                # -------- eval (IMPORTANT: all ranks must enter together) --------
                 eval_flag = False
                 if (self.nested_eval_stage is not None) and (eval_every is not None):
                     if step_type == 'iter':
-                        eval_flag = (itern // eval_every) != (itern_next // eval_every)
+                        eval_flag = ((itern // eval_every) != (itern_next // eval_every))
                         eval_flag = eval_flag and (itern_next >= eval_start)
                         eval_flag = eval_flag or (itern == 0)
                     elif step_type == 'sample':
-                        eval_flag = (samplen // eval_every) != (samplen_next // eval_every)
+                        eval_flag = ((samplen // eval_every) != (samplen_next // eval_every))
                         eval_flag = eval_flag and (samplen_next >= eval_start)
                         eval_flag = eval_flag or (samplen == 0)
 
                 if eval_flag:
                     eval_cnt = itern_next if step_type == 'iter' else samplen_next
                     net = self.set_model(net, 'eval')
-                    rv = self.nested_eval_stage(eval_cnt=eval_cnt, **paras).get('eval_rv', None)
-                    if rv is not None:
+                    rv = self.nested_eval_stage(eval_cnt=eval_cnt, **paras)
+                    rv = rv.get('eval_rv', None) if isinstance(rv, dict) else rv
+
+                    # rank0 tensorboard/best
+                    if (GRANK == 0) and (rv is not None):
                         logm.tensorboard_log(eval_cnt, rv, mode='eval')
-                    if self.is_better(rv):
+
+                    if (GRANK == 0) and (rv is not None) and self.is_better(rv):
                         self.rv_keep = rv
-                        step = {'epochn': epochn, 'itern': itern_next, 'samplen': samplen_next, 'type': step_type}
+                        step = {'epochn': epochn, 'itern': itern_next,
+                                'samplen': samplen_next, 'type': step_type}
                         self.save(net, is_best=True, step=step, optimizer=optimizer)
+
                     net = self.set_model(net, 'train')
 
-                # ckpt
+                # -------- ckpt (all ranks enter; actual write guarded safely) --------
                 ckpt_flag = False
                 if ckpt_every is not None:
                     ckpt_i = (itern // ckpt_every) != (itern_next // ckpt_every)
@@ -283,70 +205,31 @@ class train_stage(object):
                     ckpt_flag = (ckpt_i and (step_type == 'iter')) or (ckpt_s and (step_type == 'sample'))
 
                 if ckpt_flag:
-                    step = {'epochn': epochn, 'itern': itern_next, 'samplen': samplen_next, 'type': step_type}
+                    step = {'epochn': epochn, 'itern': itern_next,
+                            'samplen': samplen_next, 'type': step_type}
+                    if GRANK == 0:
+                        print_log(f'Checkpoint... {itern_next if step_type=="iter" else samplen_next}')
                     if step_type == 'iter':
-                        print_log(f'Checkpoint... {itern_next}')
                         self.save(net, itern=itern_next, step=step, optimizer=optimizer)
                     else:
-                        print_log(f'Checkpoint... {samplen_next}')
                         self.save(net, samplen=samplen_next, step=step, optimizer=optimizer)
 
-                # end
+                # -------- end --------
                 itern = itern_next
                 samplen = samplen_next
 
-                if step_num is not None:
-                    end_flag = (itern >= step_num and step_type == 'iter') or (samplen >= step_num and step_type == 'sample')
+                if step_type is not None:
+                    end_flag = (itern >= step_num and (step_type == 'iter')) or \
+                               (samplen >= step_num and (step_type == 'sample'))
                 if end_flag:
                     break
 
             epochn += 1
-            print_log(f'Epoch {epochn} time:{timeit.default_timer()-epoch_time:.2f}s.')
+            print_log('Epoch {} time:{:.2f}s.'.format(epochn, timeit.default_timer() - epoch_time))
             epoch_time = timeit.default_timer()
 
             if end_flag:
                 break
-            elif step_type != 'epoch':
-                trainloader = self.trick_update_trainloader(trainloader)
-                continue
-
-            # epoch-step logging/eval/ckpt（保持你原结构）
-            display_flag = False
-            if (log_every is not None) and (step_type == 'epoch'):
-                display_flag = (epochn == 1) or (epochn % log_every == 0)
-            if display_flag:
-                console_info = logm.train_summary(itern, epochn, samplen, lr, tbstep=epochn)
-                logm.clear()
-                print_log(console_info)
-
-            eval_flag = False
-            if (self.nested_eval_stage is not None) and (eval_every is not None) and (step_type == 'epoch'):
-                eval_flag = (epochn % eval_every == 0) and (itern >= eval_start)
-                eval_flag = (epochn == 1) or eval_flag
-
-            if eval_flag:
-                net = self.set_model(net, 'eval')
-                rv = self.nested_eval_stage(eval_cnt=epochn, **paras).get('eval_rv', None)
-                if rv is not None:
-                    logm.tensorboard_log(epochn, rv, mode='eval')
-                if self.is_better(rv):
-                    self.rv_keep = rv
-                    step = {'epochn': epochn, 'itern': itern, 'samplen': samplen, 'type': step_type}
-                    self.save(net, is_best=True, step=step, optimizer=optimizer)
-                net = self.set_model(net, 'train')
-
-            ckpt_flag = False
-            if (ckpt_every is not None) and (step_type == 'epoch'):
-                ckpt_flag = (epochn % ckpt_every) == 0
-            if ckpt_flag:
-                step = {'epochn': epochn, 'itern': itern, 'samplen': samplen, 'type': step_type}
-                print_log(f'Checkpoint... {epochn}')
-                self.save(net, epochn=epochn, step=step, optimizer=optimizer)
-
-            if (step_type == 'epoch') and (step_num is not None) and (epochn >= step_num):
-                break
-
-            trainloader = self.trick_update_trainloader(trainloader)
 
         logm.tensorboard_close()
         return {}
@@ -354,13 +237,33 @@ class train_stage(object):
     def main(self, **paras):
         raise NotImplementedError
 
-    def trick_update_trainloader(self, trainloader):
-        return trainloader
-
     def save_model(self, net, path_noext, **paras):
         path = path_noext + '.pth'
-        save_state_dict(net, path)
-        print_log(f'Saving model file {path}')
+
+        # torch module: rank0 only is fine (no jittor api)
+        if _is_torch_module(net):
+            if sync.get_rank("global") == 0:
+                netm = net.module if hasattr(net, "module") else net
+                torch.save(netm.state_dict(), path)
+                print_log(f"Saving model file {path}")
+            sync.nodewise_sync().barrier()
+            return
+
+        # jittor module: everyone calls; actual writing handled safely
+        if _is_jittor_module(net):
+            # prefer state_dict
+            obj = net.state_dict() if hasattr(net, "state_dict") else net
+            _jt_safe_save(obj, path)
+            if sync.get_rank("global") == 0:
+                print_log(f"Saving model file {path}")
+            sync.nodewise_sync().barrier()
+            return
+
+        # unknown type: rank0 pickle
+        if sync.get_rank("global") == 0:
+            import pickle
+            with open(path + ".pkl", "wb") as f:
+                pickle.dump(net, f)
 
     def save(self, net, itern=None, epochn=None, samplen=None,
              is_init=False, is_best=False, is_last=False, **paras):
@@ -369,26 +272,27 @@ class train_stage(object):
         cfgm = cfguh().cfg.model
         net_symbol = cfgm.symbol
 
-        check = sum([itern is not None, samplen is not None, epochn is not None, is_init, is_best, is_last])
+        check = sum([itern is not None, samplen is not None, epochn is not None,
+                     is_init, is_best, is_last])
         assert check < 2
 
         if itern is not None:
-            path_noexp = f'{exid}_{net_symbol}_iter_{itern}'
+            name = f'{exid}_{net_symbol}_iter_{itern}'
         elif samplen is not None:
-            path_noexp = f'{exid}_{net_symbol}_samplen_{samplen}'
+            name = f'{exid}_{net_symbol}_samplen_{samplen}'
         elif epochn is not None:
-            path_noexp = f'{exid}_{net_symbol}_epoch_{epochn}'
+            name = f'{exid}_{net_symbol}_epoch_{epochn}'
         elif is_init:
-            path_noexp = f'{exid}_{net_symbol}_init'
+            name = f'{exid}_{net_symbol}_init'
         elif is_best:
-            path_noexp = f'{exid}_{net_symbol}_best'
+            name = f'{exid}_{net_symbol}_best'
         elif is_last:
-            path_noexp = f'{exid}_{net_symbol}_last'
+            name = f'{exid}_{net_symbol}_last'
         else:
-            path_noexp = f'{exid}_{net_symbol}_default'
+            name = f'{exid}_{net_symbol}_default'
 
-        path_noexp = osp.join(cfgt.log_dir, 'weight', path_noexp)
-        self.save_model(net, path_noexp, **paras)
+        path_noext = osp.join(cfgt.log_dir, 'weight', name)
+        self.save_model(net, path_noext, **paras)
 
 
 class eval_stage(object):
@@ -396,84 +300,108 @@ class eval_stage(object):
         self.evaluator = None
 
     def create_dir(self, path):
-        if not osp.isdir(path):
-            os.makedirs(path, exist_ok=True)
+        if (sync.get_rank('global') == 0) and (not osp.isdir(path)):
+            os.makedirs(path)
+        sync.nodewise_sync().barrier()
 
     def __call__(self, evalloader, net, **paras):
-        cfgv = cfguh().cfg.eval
-        if self.evaluator is None:
-            from .evaluator import get_evaluator
-            self.evaluator = get_evaluator()(cfgv.evaluator)
+        cfgt = cfguh().cfg.eval
 
-        evaluator = self.evaluator
+        if self.evaluator is None:
+            evaluator = get_evaluator()(cfgt.evaluator)
+            self.evaluator = evaluator
+        else:
+            evaluator = self.evaluator
+
         time_check = timeit.default_timer()
 
         for idx, batch in enumerate(evalloader):
             rv = self.main(batch, net)
             evaluator.add_batch(**rv)
 
-            if cfgv.get('output_result', False):
+            if cfgt.output_result:
                 try:
                     self.output_f(**rv, cnt=paras['eval_cnt'])
                 except Exception:
                     self.output_f(**rv)
 
-            if idx % cfgv.log_display == cfgv.log_display - 1:
-                print_log(f'processed.. {idx+1}, Time:{timeit.default_timer() - time_check:.2f}s')
+            if idx % cfgt.log_display == cfgt.log_display - 1:
+                print_log('processed.. {}, Time:{:.2f}s'.format(
+                    idx + 1, timeit.default_timer() - time_check))
                 time_check = timeit.default_timer()
 
-        evaluator.set_sample_n(len(evalloader.dataset))
+        # NOTE: if you use jittor.dataset with mpi sharding, sample_n logic depends on your dataset.
+        try:
+            sample_n = len(getattr(evalloader, "dataset", evalloader))
+        except Exception:
+            sample_n = 0
+        evaluator.set_sample_n(sample_n)
+
         eval_rv = evaluator.compute()
-        evaluator.one_line_summary()
-        evaluator.save(cfgv.log_dir)
+
+        if sync.get_rank('global') == 0:
+            evaluator.one_line_summary()
+            evaluator.save(cfgt.log_dir)
+
         evaluator.clear_data()
+        sync.nodewise_sync().barrier()
         return {'eval_rv': eval_rv}
 
-    def main(self, batch, net):
-        raise NotImplementedError
-
-
-# ------------------------
-# execution containers
-# ------------------------
 
 class exec_container(object):
-    """
-    单卡版执行容器：
-    - 不 init_process_group
-    - 不 spawn 多进程
-    - local_rank 固定 0
-    """
     def __init__(self, cfg, **kwargs):
         self.cfg = cfg
         self.registered_stages = []
+        self.nodewise_sync_global_obj = sync.nodewise_sync_global()
 
     def register_stage(self, stage):
         self.registered_stages.append(stage)
 
-    def __call__(self, **kwargs):
+    def __call__(self, local_rank=None, **kwargs):
         cfg = self.cfg
         cfguh().save_cfg(cfg)
 
-        if isinstance(cfg.env.get('rnd_seed', None), int):
-            set_global_seed(cfg.env.rnd_seed)
+        # init sync info
+        sync.nodewise_sync().copy_global(self.nodewise_sync_global_obj).local_init()
+
+        GRANK, LRANK, NRANK = sync.get_rank('all')
+        GWSIZE, LWSIZE, NODES = sync.get_world_size('all')
+
+        # set seeds (numpy + torch; jittor optional)
+        if isinstance(cfg.env.rnd_seed, int):
+            np.random.seed(cfg.env.rnd_seed + GRANK)
+            torch.manual_seed(cfg.env.rnd_seed + GRANK)
+            if jt is not None and hasattr(jt, "misc") and hasattr(jt.misc, "set_global_seed"):
+                jt.misc.set_global_seed(cfg.env.rnd_seed + GRANK, different_seed_for_mpi=False)
+
+        # torch device for frozen torch modules (vae/clip)
+        if torch.cuda.is_available():
+            torch.cuda.set_device(LRANK)
 
         time_start = timeit.default_timer()
 
         para = {'itern_total': 0}
-        para.update(self.prepare_dataloader() or {})
-        para.update(self.prepare_model() or {})
+
+        dl_para = self.prepare_dataloader()
+        assert isinstance(dl_para, dict)
+        para.update(dl_para)
+
+        md_para = self.prepare_model()
+        assert isinstance(md_para, dict)
+        para.update(md_para)
 
         for stage in self.registered_stages:
             stage_para = stage(**para)
-            if stage_para:
+            if stage_para is not None:
                 para.update(stage_para)
 
-        # 可选：保存 last
+        # last save (all ranks enter; safe save inside)
         self.save_last_model(**para)
 
-        print_log(f'Total {timeit.default_timer() - time_start:.2f} seconds')
-        return para
+        if GRANK == 0:
+            print_log('Total {:.2f} seconds'.format(timeit.default_timer() - time_start))
+
+        sync.nodewise_sync().barrier()
 
     def prepare_dataloader(self):
         return {'trainloader': None, 'evalloader': None}
@@ -484,50 +412,80 @@ class exec_container(object):
     def save_last_model(self, **para):
         return
 
+    def destroy(self):
+        self.nodewise_sync_global_obj.destroy()
+
 
 class train(exec_container):
     def prepare_dataloader(self):
         cfg = cfguh().cfg
-        
-        import torch
+        gws = sync.get_world_size("global")
 
+        # train dataset (assume jittor.dataset.Dataset)
         trainset = get_dataset()(cfg.train.dataset)
-        sampler = get_sampler()(dataset=trainset, cfg=cfg.train.dataset.get('sampler', 'default_train'))
-        trainloader = torch.utils.data.DataLoader(
-            trainset,
-            batch_size=cfg.train.batch_size_per_gpu,
-            sampler=sampler,
-            num_workers=cfg.train.dataset_num_workers_per_gpu,
-            drop_last=False,
-            pin_memory=cfg.train.dataset.get('pin_memory', False),
-            collate_fn=collate(),
-        )
+
+        # IMPORTANT: Jittor Dataset batch_size is global total batch size (sum over all ranks). :contentReference[oaicite:3]{index=3}
+        total_bs = int(cfg.train.batch_size_per_gpu) * int(gws)
+        if hasattr(trainset, "set_attrs"):
+            trainset.set_attrs(
+                batch_size=total_bs,
+                shuffle=bool(cfg.train.dataset.get("shuffle", True)),
+                num_workers=int(cfg.train.dataset_num_workers_per_gpu),
+                drop_last=False,
+            )
+            trainloader = trainset
+        else:
+            # fallback (not recommended in MPI mode)
+            raise RuntimeError("trainset is not a Jittor Dataset; please migrate dataset pipeline first.")
 
         evalloader = None
         if 'eval' in cfg:
             evalset = get_dataset()(cfg.eval.dataset)
             if evalset is not None:
-                sampler = get_sampler()(dataset=evalset, cfg=cfg.eval.dataset.get('sampler', 'default_eval'))
-                evalloader = torch.utils.data.DataLoader(
-                    evalset,
-                    batch_size=cfg.eval.batch_size_per_gpu,
-                    sampler=sampler,
-                    num_workers=cfg.eval.dataset_num_workers_per_gpu,
-                    drop_last=False,
-                    pin_memory=cfg.eval.dataset.get('pin_memory', False),
-                    collate_fn=collate(),
-                )
+                total_bs_eval = int(cfg.eval.batch_size_per_gpu) * int(gws)
+                if hasattr(evalset, "set_attrs"):
+                    evalset.set_attrs(
+                        batch_size=total_bs_eval,
+                        shuffle=False,
+                        num_workers=int(cfg.eval.dataset_num_workers_per_gpu),
+                        drop_last=False,
+                    )
+                    evalloader = evalset
 
         return {'trainloader': trainloader, 'evalloader': evalloader}
 
     def prepare_model(self):
         cfg = cfguh().cfg
         net = get_model()(cfg.model)
-        net = move_to_device(net, device_id=0)
-        net.train()
 
-        scheduler = get_scheduler()(cfg.train.scheduler) if 'scheduler' in cfg.train else None
-        optimizer = get_optimizer()(net, cfg.train.optimizer) if 'optimizer' in cfg.train else None
+        # If using Jittor MPI and random init exists, broadcast params so all ranks start equal
+        # (Jittor provides Module.mpi_param_broadcast for this use case). :contentReference[oaicite:4]{index=4}
+        if _is_jittor_module(net) and sync.is_ddp() and hasattr(net, "mpi_param_broadcast"):
+            net.mpi_param_broadcast(0)
+
+        # pretrained weights: keep your original torch load path if net is torch
+        # (if your training net is jittor now, you can replace this by jittor_utils.load_pytorch.load_pytorch)
+        if _is_torch_module(net):
+            sd = torch.load('pretrained/vd-four-flow-v1-0.pth', map_location='cpu')
+            net.load_state_dict(sd, strict=False)
+
+        # parameter_group filtering (keep behavior; assumes your new get_optimizer reads this)
+        netm = net.module if hasattr(net, "module") else net
+        param_list = list(getattr(netm, "parameter_group", {}).keys())
+        print_log(f"All parameter groups: {param_list}")
+
+        train_groups = ["diffuser_text_data", "diffuser_image_context"]
+        if hasattr(netm, "parameter_group") and netm.parameter_group is not None:
+            new_pg = {}
+            for name in train_groups:
+                if name not in netm.parameter_group:
+                    raise KeyError(f"{name} not in parameter_group. Available: {param_list}")
+                new_pg[name] = netm.parameter_group[name]
+            netm.parameter_group = new_pg
+            print_log(f"Train parameter groups: {list(netm.parameter_group.keys())}")
+
+        scheduler = get_scheduler()(cfg.train.scheduler)
+        optimizer = get_optimizer()(net, cfg.train.optimizer)
 
         return {'net': net, 'optimizer': optimizer, 'scheduler': scheduler}
 
@@ -535,53 +493,8 @@ class train(exec_container):
         cfgt = cfguh().cfg.train
         net = para['net']
         net_symbol = cfguh().cfg.model.symbol
-        exid = cfguh().cfg.env.experiment_id
-        path = osp.join(cfgt.log_dir, f'{exid}_{net_symbol}_last.pth')
-        save_state_dict(net, path)
-        print_log(f'Saving model file {path}')
+        path = osp.join(cfgt.log_dir, f'{cfgt.experiment_id}_{net_symbol}_last')
 
-
-class eval(exec_container):
-    def prepare_dataloader(self):
-        cfg = cfguh().cfg
-        import torch
-
-        evalloader = None
-        if cfg.eval.get('dataset', None) is not None:
-            evalset = get_dataset()(cfg.eval.dataset)
-            if evalset is None:
-                return {'trainloader': None, 'evalloader': None}
-
-            sampler = get_sampler()(dataset=evalset, cfg=getattr(cfg.eval.dataset, 'sampler', 'default_eval'))
-            evalloader = torch.utils.data.DataLoader(
-                evalset,
-                batch_size=cfg.eval.batch_size_per_gpu,
-                sampler=sampler,
-                num_workers=cfg.eval.dataset_num_workers_per_gpu,
-                drop_last=False,
-                pin_memory=False,
-                collate_fn=collate(),
-            )
-        return {'trainloader': None, 'evalloader': evalloader}
-
-    def prepare_model(self):
-        cfg = cfguh().cfg
-        net = get_model()(cfg.model)
-        net = move_to_device(net, device_id=0)
-        net.eval()
-        return {'net': net}
-
-    def save_last_model(self, **para):
-        return
-
-
-# ------------------------
-# dynamic import helper
-# ------------------------
-
-def get_obj_from_str(string, reload=False):
-    module, cls = string.rsplit(".", 1)
-    if reload:
-        module_imp = importlib.import_module(module)
-        importlib.reload(module_imp)
-    return getattr(importlib.import_module(module, package=None), cls)
+        # reuse train_stage saver style
+        ts = train_stage()
+        ts.save_model(net, path)

@@ -1,18 +1,12 @@
-from multiprocessing import shared_memory
-# import multiprocessing
-# if hasattr(multiprocessing, "shared_memory"):
-#     from multiprocessing import shared_memory
-# else:
-#     # workaround for single gpu inference on colab
-#     shared_memory = None
-
+# sync.py (Jittor)
+import os
+import time
 import random
 import pickle
-import time
-import copy
-import torch
-import torch.distributed as dist
-from lib.cfg_holder import cfg_unique_holder as cfguh
+from typing import Any, Optional, Tuple
+
+import jittor as jt
+
 
 def singleton(class_):
     instances = {}
@@ -22,189 +16,193 @@ def singleton(class_):
         return instances[class_]
     return getinstance
 
-def is_ddp():
-    return dist.is_available() and dist.is_initialized()
 
-def get_rank(type='local'):
-    ddp = is_ddp()
-    global_rank = dist.get_rank() if ddp else 0
-    local_world_size = torch.cuda.device_count()
-    if type == 'global':
-        return global_rank
-    elif type == 'local':
-        return global_rank % local_world_size
-    elif type == 'node':
-        return global_rank // local_world_size
-    elif type == 'all':
-        return global_rank, \
-            global_rank % local_world_size, \
-            global_rank // local_world_size
-    else:
-        assert False, 'Unknown type'
-
-def get_world_size(type='local'):
-    ddp = is_ddp()
-    global_rank = dist.get_rank() if ddp else 0
-    global_world_size = dist.get_world_size() if ddp else 1
-    local_world_size = torch.cuda.device_count()
-    if type == 'global':
-        return global_world_size
-    elif type == 'local':
-        return local_world_size
-    elif type == 'node':
-        return global_world_size // local_world_size
-    elif type == 'all':
-        return global_world_size, local_world_size, \
-            global_world_size // local_world_size
-    else:
-        assert False, 'Unknown type'
-
-class barrier_lock(object):
-    def __init__(self, n):
-        self.n = n
-        id = int(random.random()*10000) + int(time.time())*10000
-        self.lock_shmname = 'barrier_lock_{}'.format(id)
-        lock_shm = shared_memory.SharedMemory(
-            name=self.lock_shmname, create=True, size=n)
-        for i in range(n):
-            lock_shm.buf[i] = 0
-        lock_shm.close()
-
-    def destroy(self):
-        try:
-            lock_shm = shared_memory.SharedMemory(
-                name=self.lock_shmname)
-            lock_shm.close()
-            lock_shm.unlink()
-        except:
-            return
-
-    def wait(self, k):
-        lock_shm = shared_memory.SharedMemory(
-            name=self.lock_shmname)
-        assert lock_shm.buf[k] == 0, 'Two waits on the same id is not allowed.'
-        lock_shm.buf[k] = 1
-        if k == 0:
-            while sum([lock_shm.buf[i]==0 for i in range(self.n)]) != 0:
+def _env_int(keys, default: Optional[int] = None) -> Optional[int]:
+    for k in keys:
+        v = os.environ.get(k, None)
+        if v is not None:
+            try:
+                return int(v)
+            except Exception:
                 pass
-            for i in range(self.n):
-                lock_shm.buf[i] = 0
-            return 
-        else:
-            while lock_shm.buf[k] != 0:
-                pass
+    return default
+
+
+def is_ddp() -> bool:
+    # keep old API name; in Jittor this means "in mpi"
+    return (jt is not None) and bool(getattr(jt, "in_mpi", False)) and int(getattr(jt, "world_size", 1)) > 1
+
+
+def _global_rank() -> int:
+    if jt is not None:
+        return int(getattr(jt, "rank", 0))
+    return _env_int(["OMPI_COMM_WORLD_RANK", "PMI_RANK", "RANK"], 0) or 0
+
+
+def _global_world_size() -> int:
+    if jt is not None:
+        return int(getattr(jt, "world_size", 1))
+    return _env_int(["OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "WORLD_SIZE"], 1) or 1
+
+
+def _local_rank() -> int:
+    return _env_int(
+        ["OMPI_COMM_WORLD_LOCAL_RANK", "MPI_LOCALRANKID", "LOCAL_RANK", "SLURM_LOCALID"],
+        None
+    ) or (_global_rank() % max(_local_world_size(), 1))
+
+
+def _local_world_size() -> int:
+    # prefer MPI-provided local size; fallback to visible CUDA count if you want
+    return _env_int(
+        ["OMPI_COMM_WORLD_LOCAL_SIZE", "MPI_LOCALNRANKS", "LOCAL_WORLD_SIZE", "SLURM_NTASKS_PER_NODE"],
+        None
+    ) or int(os.environ.get("CUDA_VISIBLE_DEVICES", "").count(",") + 1 if os.environ.get("CUDA_VISIBLE_DEVICES") else 1)
+
+
+def _node_rank() -> int:
+    # node rank (which node am I on)
+    nr = _env_int(["OMPI_COMM_WORLD_NODE_RANK", "SLURM_NODEID"], None)
+    if nr is not None:
+        return nr
+    lws = max(_local_world_size(), 1)
+    return _global_rank() // lws
+
+
+def get_rank(type: str = "local"):
+    gr = _global_rank()
+    lr = _local_rank()
+    nr = _node_rank()
+    if type == "global":
+        return gr
+    elif type == "local":
+        return lr
+    elif type == "node":
+        return nr
+    elif type == "all":
+        return gr, lr, nr
+    else:
+        raise ValueError("Unknown type")
+
+
+def get_world_size(type: str = "local"):
+    gws = _global_world_size()
+    lws = _local_world_size()
+    nodes = max(gws // max(lws, 1), 1)
+    if type == "global":
+        return gws
+    elif type == "local":
+        return lws
+    elif type == "node":
+        return nodes
+    elif type == "all":
+        return gws, lws, nodes
+    else:
+        raise ValueError("Unknown type")
+
+
+def _mpi_barrier():
+    if not is_ddp():
+        return
+    # emulate a barrier via all_reduce; everyone must call it
+    x = jt.array([1], dtype=jt.int32)
+    _ = x.mpi_all_reduce("add")
+    _.sync()
+
+
+def _mpi_broadcast_bytes(buf: bytes, root: int) -> bytes:
+    """
+    Broadcast arbitrary bytes from root to all ranks, using jt.mpi_broadcast.
+    Everyone must call this function.
+    """
+    if not is_ddp():
+        return buf
+
+    # 1) broadcast length
+    if _global_rank() == root:
+        n = len(buf)
+    else:
+        n = 0
+    n_var = jt.array([n], dtype=jt.int32)
+    n_var = jt.mpi.mpi_broadcast(n_var, root=root)
+    n = int(n_var.data[0])
+
+    # 2) broadcast payload
+    if _global_rank() == root:
+        arr = jt.array(list(buf), dtype=jt.uint8)
+    else:
+        arr = jt.zeros([n], dtype=jt.uint8)
+    arr = jt.mpi.mpi_broadcast(arr, root=root)
+    out = bytes(arr.data.tolist())
+    return out
+
 
 class nodewise_sync_global(object):
     """
-    This is the global part of nodewise_sync that need to call at master process
-        before spawn.
-    """
-    def __init__(self):
-        self.local_world_size = get_world_size('local')
-        self.b_lock = barrier_lock(self.local_world_size)
-        id = int(random.random()*10000) + int(time.time())*10000
-        self.id_shmname = 'nodewise_sync_id_shm_{}'.format(id)
-
-    def destroy(self):
-        self.b_lock.destroy()
-        try:
-            shm = shared_memory.SharedMemory(name=self.id_shmname)
-            shm.close()
-            shm.unlink()
-        except:
-            return
-
-@singleton
-class nodewise_sync(object):
-    """
-    A class that centralize nodewise sync activities.
-    The backend is multiprocess sharememory, not torch, as torch not support this.
+    In torch-ddp-spawn version this carried shared-memory barrier resources.
+    In MPI mode we don't need a separate "global" object; keep it for compatibility.
     """
     def __init__(self):
         pass
 
+    def destroy(self):
+        return
+
+
+@singleton
+class nodewise_sync(object):
+    """
+    Keep original interface: barrier() and broadcast_r0().
+    In MPI we implement them with MPI collectives (global scope).
+    """
+    def __init__(self):
+        self.local_rank = None
+        self.global_rank = None
+        self.node_rank = None
+        self.global_world_size = None
+        self.local_world_size = None
+        self.nodes = None
+
     def copy_global(self, reference):
-        self.local_world_size = reference.local_world_size
-        self.b_lock = reference.b_lock
-        self.id_shmname = reference.id_shmname
+        # compatibility no-op
         return self
 
     def local_init(self):
-        self.ddp = is_ddp()
-        self.global_rank, self.local_rank, self.node_rank = get_rank('all')
-        self.global_world_size, self.local_world_size, self.nodes = get_world_size('all')
-        if self.local_rank == 0:
-            temp = int(random.random()*10000) + int(time.time())*10000
-            temp = pickle.dumps(temp)
-            shm = shared_memory.SharedMemory(
-                name=self.id_shmname, create=True, size=len(temp))
-            shm.close()
+        self.global_rank, self.local_rank, self.node_rank = get_rank("all")
+        self.global_world_size, self.local_world_size, self.nodes = get_world_size("all")
         return self
 
-    def random_sync_id(self):
-        assert self.local_rank is not None, 'Not initialized!'
-        if self.local_rank == 0:
-            sync_id = int(random.random()*10000) + int(time.time())*10000
-            data = pickle.dumps(sync_id)
-            shm = shared_memory.SharedMemory(name=self.id_shmname)
-            shm.buf[0:len(data)] = data[0:len(data)]
-            self.barrier()
-            shm.close()
-        else:
-            self.barrier()
-            shm = shared_memory.SharedMemory(name=self.id_shmname)
-            sync_id = pickle.loads(shm.buf)
-            shm.close()
-        return sync_id
+    def random_sync_id(self) -> int:
+        # global broadcast a random int (root=0)
+        rid = int(random.random() * 10000) + int(time.time()) * 10000
+        if is_ddp():
+            v = jt.array([rid if self.global_rank == 0 else 0], dtype=jt.int32)
+            v = jt.mpi.mpi_broadcast(v, root=0)
+            rid = int(v.data[0])
+        return rid
 
     def barrier(self):
-        self.b_lock.wait(self.local_rank)
+        _mpi_barrier()
 
-    def broadcast_r0(self, data=None):
-        assert self.local_rank is not None, 'Not initialized!'
-        id = self.random_sync_id()
-        shmname = 'broadcast_r0_{}'.format(id)
-        if self.local_rank == 0:
-            assert data!=None, 'Rank 0 needs to input data!'
-            data = pickle.dumps(data)
-            datan = len(data)
-            load_info_shm = shared_memory.SharedMemory(
-                name=shmname, create=True, size=datan)
-            load_info_shm.buf[0:datan] = data[0:datan]
-            self.barrier()
-            self.barrier()
-            load_info_shm.close()
-            load_info_shm.unlink()
-            return None
-        else:
-            assert data==None, 'Rank other than 1 should input None as data!'
-            self.barrier()
-            shm = shared_memory.SharedMemory(name=shmname)
-            data = pickle.loads(shm.buf)
-            shm.close()
-            self.barrier()
+    def broadcast_r0(self, data: Any = None):
+        """
+        Broadcast python object from *global rank 0* to everyone.
+        Everyone must call it.
+        - rank0 passes data
+        - others pass None
+        """
+        if not is_ddp():
             return data
 
+        if self.global_rank == 0:
+            payload = pickle.dumps(data)
+        else:
+            payload = b""
+
+        payload = _mpi_broadcast_bytes(payload, root=0)
+        if self.global_rank == 0:
+            return None
+        return pickle.loads(payload)
+
     def destroy(self):
-        self.barrier.destroy()
-        try:
-            shm = shared_memory.SharedMemory(name=self.id_shmname)
-            shm.close()
-            shm.unlink()
-        except:
-            return
-
-# import contextlib
-
-# @contextlib.contextmanager
-# def weight_sync(module, sync):
-#     assert isinstance(module, torch.nn.Module)
-#     if sync or not isinstance(module, torch.nn.parallel.DistributedDataParallel):
-#         yield
-#     else:
-#         with module.no_sync():
-#             yield
-
-# def weight_sync(net):
-#     for parameters in net.parameters():
-#         dist.all_reduce(parameters, dist.ReduceOp.AVG)
+        return
