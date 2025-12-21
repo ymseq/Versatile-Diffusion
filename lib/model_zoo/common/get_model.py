@@ -40,6 +40,7 @@ class get_model(object):
         Construct model based on the config. 
         """
         t = cfg.type
+        # print_log(f"!!!!!!!!Constructing model of type: {t}")
 
         # the register is in each file
         if t=='autoencoderkl':

@@ -20,8 +20,10 @@ class TorchVAEContextHub:
         vae_cfg_list=None,
         ctx_cfg_list=None,
         cache_dir=None,
+        fp16=False,
     ):
         self.cache_dir = cache_dir
+        self.fp16 = fp16
 
         self.vae = self._build_moduledict(vae_cfg_list or [])
         self.ctx = self._build_moduledict(ctx_cfg_list or [])

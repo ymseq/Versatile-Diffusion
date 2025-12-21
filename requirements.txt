@@ -1,8 +1,8 @@
-numpy>=1.19
+# numpy==1.23.5
 
 matplotlib==3.4.2
-pyyaml==5.4.1
-opencv-python==4.5.1.48
+# pyyaml==5.4.1
+# opencv-python==4.8.1.78
 easydict==1.9
 # scikit-image==0.17.2
 tqdm==4.60.0
@@ -17,7 +17,7 @@ tensorboard==1.15.0
 tensorboardx==2.1
 
 # ==== Jittor ====
-jittor
+# jittor
 
 # ==== PyTorch 生态：只用来加载预训练模型 & 评估 ====
 

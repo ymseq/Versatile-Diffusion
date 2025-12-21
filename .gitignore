@@ -3,8 +3,8 @@ __pycache__
 src/
 data/
 data
-log/
-log
+logs/
+logs
 pretrained/
 pretrained
 gradio_cached_examples/

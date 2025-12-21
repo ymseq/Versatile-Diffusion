@@ -27,3 +27,34 @@ vd_four_flow_v1-0:
     global_layer_ptr: image
     latent_scale_factor: 
       image: 0.18215
+
+vd_text_to_image:
+  super_cfg: vd_base
+  args:
+    vae_cfg_list:
+      - [image, MODEL(autokl_v1)]
+    ctx_cfg_list:
+      - [text, MODEL(clip_text_context_encoder)]
+    diffuser_cfg_list:
+      - [image, MODEL(openai_unet_2d_v1)]
+      - [text, MODEL(openai_unet_0d_v1_dc)]
+    global_layer_ptr: image
+    latent_scale_factor: 
+      image: 0.18215
+
+
+
+vd_image_to_text:
+  super_cfg: vd_base
+  args:
+    vae_cfg_list:
+      - [text, MODEL(optimus_v1)]
+    ctx_cfg_list:
+      - [image, MODEL(clip_image_context_encoder)]
+    diffuser_cfg_list:
+      - [image, MODEL(openai_unet_2d_v1)]
+      - [text, MODEL(openai_unet_0d_v1_dc)]
+    global_layer_ptr: image
+    latent_scale_factor: 
+      image: 0.18215
+

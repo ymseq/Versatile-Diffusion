@@ -7,12 +7,13 @@ import numpy as np
 import torch  # keep torch for frozen VAE/CLIP etc.
 
 import jittor as jt
+import importlib
 
 from .cfg_holder import cfg_unique_holder as cfguh
 from .data_factory import get_dataset, collate, get_sampler
 from .model_zoo import get_model, get_optimizer, get_scheduler
 from .log_service import print_log, distributed_log_manager
-from .evaluator import get_evaluator
+from .evaluator.evaluator import get_evaluator
 from . import sync
 
 
@@ -111,22 +112,19 @@ class train_stage(object):
         epoch_time = timeit.default_timer()
         end_flag = False
         net = self.set_model(net, 'train')
+        net.to('cuda')
 
         while True:
             if step_type == 'epoch':
                 lr = scheduler[epochn] if scheduler is not None else None
-
             for batch in trainloader:
-                # batch size inference
                 b0 = batch[0]
                 if isinstance(b0, list):
                     bs = len(b0)
                 else:
                     bs = int(getattr(b0, "shape", [len(b0)])[0])
-
                 if cfgt.skip_partial_batch and (bs != cfgt.batch_size_per_gpu):
                     continue
-
                 itern_next = itern + 1
                 samplen_next = samplen + bs * GWSIZE
 
@@ -294,7 +292,6 @@ class train_stage(object):
         path_noext = osp.join(cfgt.log_dir, 'weight', name)
         self.save_model(net, path_noext, **paras)
 
-
 class eval_stage(object):
     def __init__(self):
         self.evaluator = None
@@ -347,7 +344,6 @@ class eval_stage(object):
         sync.nodewise_sync().barrier()
         return {'eval_rv': eval_rv}
 
-
 class exec_container(object):
     def __init__(self, cfg, **kwargs):
         self.cfg = cfg
@@ -391,6 +387,7 @@ class exec_container(object):
         para.update(md_para)
 
         for stage in self.registered_stages:
+            # print_log(f'Executing stage: {stage.__class__.__name__}')
             stage_para = stage(**para)
             if stage_para is not None:
                 para.update(stage_para)
@@ -415,13 +412,10 @@ class exec_container(object):
     def destroy(self):
         self.nodewise_sync_global_obj.destroy()
 
-
 class train(exec_container):
     def prepare_dataloader(self):
         cfg = cfguh().cfg
         gws = sync.get_world_size("global")
-
-        # train dataset (assume jittor.dataset.Dataset)
         trainset = get_dataset()(cfg.train.dataset)
 
         # IMPORTANT: Jittor Dataset batch_size is global total batch size (sum over all ranks). :contentReference[oaicite:3]{index=3}
@@ -451,38 +445,18 @@ class train(exec_container):
                         drop_last=False,
                     )
                     evalloader = evalset
-
+        # print_log("Dataloaders prepared.")
         return {'trainloader': trainloader, 'evalloader': evalloader}
 
     def prepare_model(self):
         cfg = cfguh().cfg
         net = get_model()(cfg.model)
 
-        # If using Jittor MPI and random init exists, broadcast params so all ranks start equal
-        # (Jittor provides Module.mpi_param_broadcast for this use case). :contentReference[oaicite:4]{index=4}
         if _is_jittor_module(net) and sync.is_ddp() and hasattr(net, "mpi_param_broadcast"):
             net.mpi_param_broadcast(0)
 
-        # pretrained weights: keep your original torch load path if net is torch
-        # (if your training net is jittor now, you can replace this by jittor_utils.load_pytorch.load_pytorch)
-        if _is_torch_module(net):
-            sd = torch.load('pretrained/vd-four-flow-v1-0.pth', map_location='cpu')
-            net.load_state_dict(sd, strict=False)
-
-        # parameter_group filtering (keep behavior; assumes your new get_optimizer reads this)
-        netm = net.module if hasattr(net, "module") else net
-        param_list = list(getattr(netm, "parameter_group", {}).keys())
-        print_log(f"All parameter groups: {param_list}")
-
-        train_groups = ["diffuser_text_data", "diffuser_image_context"]
-        if hasattr(netm, "parameter_group") and netm.parameter_group is not None:
-            new_pg = {}
-            for name in train_groups:
-                if name not in netm.parameter_group:
-                    raise KeyError(f"{name} not in parameter_group. Available: {param_list}")
-                new_pg[name] = netm.parameter_group[name]
-            netm.parameter_group = new_pg
-            print_log(f"Train parameter groups: {list(netm.parameter_group.keys())}")
+        sd = torch.load(cfg.model_pretrain_path, map_location='cpu')
+        net.load_state_dict(sd, strict=False)
 
         scheduler = get_scheduler()(cfg.train.scheduler)
         optimizer = get_optimizer()(net, cfg.train.optimizer)
@@ -498,3 +472,46 @@ class train(exec_container):
         # reuse train_stage saver style
         ts = train_stage()
         ts.save_model(net, path)
+
+class eval(exec_container):
+    def prepare_dataloader(self):
+        cfg = cfguh().cfg
+        gws = sync.get_world_size("global")
+        evalloader = None
+        if cfg.eval.get('dataset', None) is not None:
+            evalset = get_dataset()(cfg.eval.dataset)
+            if evalset is None:
+                return
+            total_bs_eval = int(cfg.eval.batch_size_per_gpu) * int(gws)
+            if hasattr(evalset, "set_attrs"):
+                evalset.set_attrs(
+                    batch_size=total_bs_eval,
+                    shuffle=False,
+                    num_workers=int(cfg.eval.dataset_num_workers_per_gpu),
+                    drop_last=False,
+                )
+                evalloader = evalset
+        return {
+            'trainloader' : None,
+            'evalloader'  : evalloader,}
+
+    def prepare_model(self):
+        cfg = cfguh().cfg
+        net = get_model()(cfg.model)
+        if _is_jittor_module(net) and sync.is_ddp() and hasattr(net, "mpi_param_broadcast"):
+            net.mpi_param_broadcast(0)
+
+        sd = torch.load(cfg.model_pretrain_path, map_location='cpu')
+        net.load_state_dict(sd, strict=False)
+        net.eval()
+        return {'net' : net,}
+
+    def save_last_model(self, **para):
+        return
+
+def get_obj_from_str(string, reload=False):
+    module, cls = string.rsplit(".", 1)
+    if reload:
+        module_imp = importlib.import_module(module)
+        importlib.reload(module_imp)
+    return getattr(importlib.import_module(module, package=None), cls)

@@ -1,0 +1,109 @@
+env:
+  experiment_id: "image_to_text_finetune"
+  log_root_dir: "./logs" 
+  log_dir: "./logs/image_to_text_finetune"
+  gpu_count: 1
+  nodes: 1
+  node_rank: 0
+  dist_backend: "nccl"
+  dist_url: "tcp://127.0.0.1:11233"
+  cuda: true
+  rnd_seed: 42
+
+model: MODEL(vd_image_to_text)
+model_pretrain_path: "/root/vd/pretrained/vd-four-flow-v1-0.pth"
+
+train:
+  main:  "lib.utils.train"
+  stage: "lib.image_to_text_train_stage.ImageToTextTrainStage"
+
+  # ----------------- batch & dataloader -----------------
+  batch_size: 1
+  batch_size_per_gpu: 1
+  dataset_num_workers: 1
+  dataset_num_workers_per_gpu: 1
+
+  skip_partial_batch: false
+
+  # ----------------- 训练步数 & 日志 / ckpt -----------------
+  step_type: "iter"             # 以迭代数作为 step 计数
+  step_num: 100000              # 总共多少个 iter
+
+  log_every: 10         # 或 20，先让你能看到进度
+  eval_every: 1000      # 每 1000 iter eval 一次（根据你的速度可调）
+  eval_start: 1000      # 可选：避免一开始就 eval
+  ckpt_every: 1000      # 你已经是 1000
+
+  
+  save_init_model: false         # 保存一份 init.pth（你已经看到那行 log 了）
+  gradacc_every: 10             # 梯度累积
+  
+  max_txt_len: 77
+
+  vd:
+    # x：被加噪 / 去噪的分支（这里是“文本 latent”）
+    x_type: "text"      # 和 vd.diffuser["text"] 对齐
+    x_vae:  "text"      # 和 vd.vae["text"]（optimus_vae_next）对齐
+
+    # c：条件分支（这里是“图像 context”）
+    c_type: "image"     # 和 vd.diffuser["image"] 对齐
+    c_ctx:  "image"     # 和 vd.ctx["image"]（clip_image_context_encoder）对齐
+
+  # ----------------- 数据集配置（配合 MyVDDataset） -----------------
+  dataset:
+    symbol: "my_vd_dataset"     # 只是一个名字，会出现在 log 目录里
+    name:   "my_vd_dataset"     # 你的 get_dataset() 里默认就是这个
+    root: "./data/train"        # 里面要有 images/ 和 meta.jsonl
+    meta_file: "meta.jsonl"
+    image_size: 256             # MyVDDataset 里用来 Resize / CenterCrop
+    sampler: "default_train"    # 我们在 get_sampler() 里支持的名字
+
+  # ----------------- 优化器 -----------------
+  optimizer:
+    type: "adamw"               # get_optimizer 里注册的名字
+    args:                       # !!! 一定要有 args，这就是报错的关键
+      lr: 1.0e-5
+      weight_decay: 0.01
+      betas: [0.9, 0.999]
+  # optimizer:
+  #   type: "sgd"
+  #   args:
+  #     lr: 1.0e-5         # 可以先大一点试，微调再慢慢调
+  #     momentum: 0.9
+  #     weight_decay: 0.01
+
+
+  # ----------------- 学习率 scheduler -----------------
+  scheduler: null
+  # scheduler:
+  #   type: "constant"            # 对应 @register('constant') 的 constant_scheduler
+  #   args:                       # 这里的字段会直接传到 __init__(lr, step)
+  #     lr: 1.0e-5                # 常数学习率（和上面的 lr 保持一致就行）
+  #     step: 100000              # 和 step_num 对齐（总 iter 数）
+
+
+eval:
+  main: "lib.utils.eval"
+  stage: "lib.image_to_text_eval_stage.ImageToTextEvalStage"
+  batch_size: 1
+  batch_size_per_gpu: 1
+  dataset_num_workers: 1
+  dataset_num_workers_per_gpu: 1
+
+  log_display: 100
+  log_dir: "./logs/image_to_text_finetune/eval"
+  output_result: false
+
+  evaluator:
+    name: "avg_loss"
+    args:
+      pass
+
+  skip_partial_batch: false
+  dataset:
+    symbol: "my_vd_dataset"     # 只是一个名字，会出现在 log 目录里
+    name:   "my_vd_dataset"     # 你的 get_dataset() 里默认就是这个
+    root: "./data/eval"        # 里面要有 images/ 和 meta.jsonl
+    meta_file: "meta.jsonl"
+    image_size: 256             # MyVDDataset 里用来 Resize / CenterCrop
+    sampler: "default_train"    # 我们在 get_sampler() 里支持的名字

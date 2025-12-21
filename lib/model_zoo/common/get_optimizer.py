@@ -65,11 +65,11 @@ class get_optimizer(object):
         opt_cls = self.optimizer[t]
 
         try:
-            return opt_cls(params, lr=0, **cfg.args)
+            return opt_cls(params, **cfg.args)
         except TypeError:
             if isinstance(params, list) and len(params) > 0 and isinstance(params[0], dict):
                 flat = []
                 for g in params:
                     flat.extend(g.get("params", []))
                 params = flat
-            return opt_cls(params, lr=0, **cfg.args)
+            return opt_cls(params, **cfg.args)

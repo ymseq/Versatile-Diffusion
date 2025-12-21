@@ -27,6 +27,7 @@ import torchvision.transforms as tvtrans
 from lib.cfg_helper import model_cfg_bank
 from lib.model_zoo import get_model
 from cusomized_gradio_blocks import create_myexamples, customized_as_example, customized_postprocess
+import jittor as jt
 
 n_sample_image = 2
 n_sample_text = 4
@@ -264,9 +265,9 @@ class vd_inference(object):
 
         if self.which == 'v1.0':
             if fp16:
-                sd = torch.load('pretrained/vd-four-flow-v1-0-fp16.pth', map_location='cpu')
+                sd = jt.load('pretrained/vd-four-flow-v1-0-fp16.pth')
             else:
-                sd = torch.load('pretrained/vd-four-flow-v1-0.pth', map_location='cpu')
+                sd = jt.load('pretrained/vd-four-flow-v1-0.pth')
             # from huggingface_hub import hf_hub_download
             # if fp16:
             #     temppath = hf_hub_download('shi-labs/versatile-diffusion-model', 'pretrained_pth/vd-four-flow-v1-0-fp16.pth')
@@ -579,7 +580,7 @@ class vd_inference(object):
         return input_save, imout
 
 # vd_inference = vd_dummy()
-vd_inference = vd_inference(which='v1.0', fp16=True)
+vd_inference = vd_inference(which='v1.0', fp16=False)
 
 #################
 # sub interface #
