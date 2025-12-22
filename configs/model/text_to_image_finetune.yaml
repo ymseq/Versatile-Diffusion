@@ -11,7 +11,8 @@ env:
   rnd_seed: 42
 
 model: MODEL(vd_text_to_image)
-model_pretrain_path: "/root/vd/pretrained/vd-four-flow-v1-0.pth"
+# model_pretrain_path: "/root/vd/pretrained/vd-four-flow-v1-0.pth"
+model_pretrain_path: "/root/vd/logs/vd_my_vd_dataset/176633466579_s42/weight/176633466579_vd_best.pth"
 
 train:
   main:  "lib.utils.train"
@@ -27,12 +28,12 @@ train:
 
   # ----------------- 训练步数 & 日志 / ckpt -----------------
   step_type: "iter"             # 以迭代数作为 step 计数
-  step_num: 100000              # 总共多少个 iter
+  step_num: 50000              # 总共多少个 iter
 
   log_every: 10         # 或 20，先让你能看到进度
   eval_every: 1000      # 每 1000 iter eval 一次（根据你的速度可调）
   eval_start: 1000      # 可选：避免一开始就 eval
-  ckpt_every: 1000      # 你已经是 1000
+  ckpt_every: 10000      # 你已经是 1000
 
   
   save_init_model: false         # 保存一份 init.pth（你已经看到那行 log 了）
@@ -49,28 +50,37 @@ train:
     c_type: "text" 
     c_ctx:  "text"
 
-  # ----------------- 数据集配置（配合 MyVDDataset） -----------------
+  #----------------- 数据集配置（配合 MyVDDataset） -----------------
   dataset:
     symbol: "my_vd_dataset"     # 只是一个名字，会出现在 log 目录里
     name:   "my_vd_dataset"     # 你的 get_dataset() 里默认就是这个
-    root: "./data/train2"        # 里面要有 images/ 和 meta.jsonl
+
+    # root: "./data/train2"        # 里面要有 images/ 和 meta.jsonl
+    # meta_file: "meta.jsonl"
+    
+    root: "/root/data/laion-subset/train"
     meta_file: "meta.jsonl"
+
+
     image_size: 256             # MyVDDataset 里用来 Resize / CenterCrop
     sampler: "default_train"    # 我们在 get_sampler() 里支持的名字
 
+  
+
+
   # ----------------- 优化器 -----------------
-  optimizer:
-    type: "adam"
-    args:
-      lr: 1.0e-5
-      weight_decay: 0.01
-      betas: [0.9, 0.999]
   # optimizer:
-  #   type: "sgd"
+  #   type: "adam"
   #   args:
   #     lr: 1.0e-5
-  #     momentum: 0.9
-  #     weight_decay: 0.0
+  #     weight_decay: 0.01
+  #     betas: [0.9, 0.999]
+  optimizer:
+    type: "sgd"
+    args:
+      lr: 1.0e-5
+      momentum: 0.9
+      weight_decay: 0.0
 
 
   # ----------------- 学习率 scheduler -----------------
@@ -103,7 +113,14 @@ eval:
   dataset:
     symbol: "my_vd_dataset"     # 只是一个名字，会出现在 log 目录里
     name:   "my_vd_dataset"     # 你的 get_dataset() 里默认就是这个
-    root: "./data/eval"        # 里面要有 images/ 和 meta.jsonl
+
+    # root: "./data/eval"        # 里面要有 images/ 和 meta.jsonl
+    # meta_file: "meta.jsonl"
+
+    root: "/root/data/laion-subset/eval"
     meta_file: "meta.jsonl"
+
     image_size: 256
-    sampler: "default_train"
+    # sampler: "default_train"
+    sampler: "default_val"
+    

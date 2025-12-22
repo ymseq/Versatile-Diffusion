@@ -455,7 +455,7 @@ class train(exec_container):
         if _is_jittor_module(net) and sync.is_ddp() and hasattr(net, "mpi_param_broadcast"):
             net.mpi_param_broadcast(0)
 
-        sd = torch.load(cfg.model_pretrain_path, map_location='cpu')
+        sd = torch.load(cfg.model_pretrain_path, map_location='cpu',weights_only=False)
         net.load_state_dict(sd, strict=False)
 
         scheduler = get_scheduler()(cfg.train.scheduler)

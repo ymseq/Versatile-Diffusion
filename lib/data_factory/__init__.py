@@ -1,4 +1,5 @@
 from lib.data_factory.my_vd_dataset import MyVDDataset
+from lib.data_factory.my_dataset_tar import MyVDDatasetTar
 from torch.utils.data.dataloader import default_collate
 from torch.utils.data import RandomSampler, SequentialSampler
 
@@ -12,9 +13,16 @@ def get_dataset():
     def _builder(ds_cfg):
         # 如果以后有别的数据集，可以在这里根据 ds_cfg.name 分支
         name = getattr(ds_cfg, "name", "my_vd_dataset")
-        if name != "my_vd_dataset":
+        if name == "my_vd_dataset":
+            return MyVDDataset(ds_cfg)
+        if name in ("my_vd_dataset_tar", "my_vd_tar"):
+            return MyVDDatasetTar(ds_cfg)
+        else:
             raise ValueError(f"Unknown dataset name: {name}")
-        return MyVDDataset(ds_cfg)
+
+        # if name != "my_vd_dataset":
+        #     raise ValueError(f"Unknown dataset name: {name}")
+        # return MyVDDataset(ds_cfg)
 
     return _builder
 

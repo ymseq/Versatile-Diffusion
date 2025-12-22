@@ -1,7 +1,7 @@
 env:
-  experiment_id: "image_to_text_finetune"
+  experiment_id: "vd_finetune_mydata"
   log_root_dir: "./logs" 
-  log_dir: "./logs/image_to_text_finetune"
+  log_dir: "./logs/vd_finetune_mydata"
   gpu_count: 1
   nodes: 1
   node_rank: 0
@@ -10,15 +10,13 @@ env:
   cuda: true
   rnd_seed: 42
 
-model: MODEL(vd_image_to_text)
-model_pretrain_path: "/root/vd/pretrained/vd-four-flow-v1-0.pth"
-
-
-
+model: MODEL(vd_image_var)
+# model_pretrain_path: "/root/vd/pretrained/vd-four-flow-v1-0.pth"
+model_pretrain_path: "/root/vd/logs/vd_my_vd_dataset/176633466579_s42/weight/176633466579_vd_best.pth"
 
 train:
   main:  "lib.utils.train"
-  stage: "lib.image_to_text_train_stage.ImageToTextTrainStage"
+  stage: "lib.image_var_train_stage.ImageVarTrainStage"
 
   # ----------------- batch & dataloader -----------------
   batch_size: 1
@@ -44,41 +42,44 @@ train:
   max_txt_len: 77
 
   vd:
-    # x：被加噪 / 去噪的分支（这里是“文本 latent”）
-    x_type: "text"      # 和 vd.diffuser["text"] 对齐
-    x_vae:  "text"      # 和 vd.vae["text"]（optimus_vae_next）对齐
 
-    # c：条件分支（这里是“图像 context”）
-    c_type: "image"     # 和 vd.diffuser["image"] 对齐
-    c_ctx:  "image"     # 和 vd.ctx["image"]（clip_image_context_encoder）对齐
+    x_type: "image"
+    x_vae:  "image"
 
-  # ----------------- 数据集配置（配合 MyVDDataset） -----------------
+    c_type: "image" 
+    c_ctx:  "image"
+
+  #----------------- 数据集配置（配合 MyVDDataset） -----------------
   dataset:
     symbol: "my_vd_dataset"     # 只是一个名字，会出现在 log 目录里
     name:   "my_vd_dataset"     # 你的 get_dataset() 里默认就是这个
 
-    # root: "./data/train"        # 里面要有 images/ 和 meta.jsonl
+    # root: "./data/train2"        # 里面要有 images/ 和 meta.jsonl
     # meta_file: "meta.jsonl"
-
+    
     root: "/root/data/laion-subset/train"
     meta_file: "meta.jsonl"
+
 
     image_size: 256             # MyVDDataset 里用来 Resize / CenterCrop
     sampler: "default_train"    # 我们在 get_sampler() 里支持的名字
 
+  
+
+
   # ----------------- 优化器 -----------------
   # optimizer:
-  #   type: "adam"               # get_optimizer 里注册的名字
-  #   args:                       # !!! 一定要有 args，这就是报错的关键
+  #   type: "adam"
+  #   args:
   #     lr: 1.0e-5
   #     weight_decay: 0.01
   #     betas: [0.9, 0.999]
   optimizer:
     type: "sgd"
     args:
-      lr: 1.0e-5         # 可以先大一点试，微调再慢慢调
+      lr: 1.0e-5
       momentum: 0.9
-      weight_decay: 0.01
+      weight_decay: 0.0
 
 
   # ----------------- 学习率 scheduler -----------------
@@ -88,21 +89,18 @@ train:
   #   args:                       # 这里的字段会直接传到 __init__(lr, step)
   #     lr: 1.0e-5                # 常数学习率（和上面的 lr 保持一致就行）
   #     step: 100000              # 和 step_num 对齐（总 iter 数）
-
-
-
-  
+      
 
 eval:
   main: "lib.utils.eval"
-  stage: "lib.image_to_text_eval_stage.ImageToTextEvalStage"
+  stage: "lib.image_var_eval_stage.ImageVarEvalStage"
   batch_size: 1
   batch_size_per_gpu: 1
   dataset_num_workers: 1
   dataset_num_workers_per_gpu: 1
 
   log_display: 100
-  log_dir: "./logs/image_to_text_finetune/eval"
+  log_dir: "./logs/image_var_finetune/eval"
   output_result: false
 
   evaluator:
@@ -121,8 +119,7 @@ eval:
     root: "/root/data/laion-subset/eval"
     meta_file: "meta.jsonl"
 
-    image_size: 256             # MyVDDataset 里用来 Resize / CenterCrop
-
-    # sampler: "default_train"    # 我们在 get_sampler() 里支持的名字
-    sampler: "default_eval"
-
+    image_size: 256
+    # sampler: "default_train"
+    sampler: "default_val"
+    
