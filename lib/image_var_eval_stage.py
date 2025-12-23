@@ -7,7 +7,7 @@ from lib import sync
 import torch
 
 
-class ImageToTextEvalStage(eval_stage):
+class ImageVarEvalStage(eval_stage):
     def __init__(self):
         super().__init__()
 
