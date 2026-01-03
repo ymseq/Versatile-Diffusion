@@ -327,7 +327,6 @@ class eval_stage(object):
                     idx + 1, timeit.default_timer() - time_check))
                 time_check = timeit.default_timer()
 
-        # NOTE: if you use jittor.dataset with mpi sharding, sample_n logic depends on your dataset.
         try:
             sample_n = len(getattr(evalloader, "dataset", evalloader))
         except Exception:

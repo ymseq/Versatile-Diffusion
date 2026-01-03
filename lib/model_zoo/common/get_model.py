@@ -13,20 +13,6 @@ def singleton(class_):
         return instances[class_]
     return getinstance
 
-# def preprocess_model_args(args):
-#     # If args has layer_units, get the corresponding
-#     #     units.
-#     # If args get backbone, get the backbone model.
-#     args = copy.deepcopy(args)
-#     if 'layer_units' in args:
-#         layer_units = [
-#             get_unit()(i) for i in args.layer_units
-#         ]
-#         args.layer_units = layer_units
-#     if 'backbone' in args:
-#         args.backbone = get_model()(args.backbone)
-#     return args
-
 @singleton
 class get_model(object):
     def __init__(self):

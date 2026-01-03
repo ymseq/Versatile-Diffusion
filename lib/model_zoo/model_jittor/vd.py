@@ -602,20 +602,6 @@ class VD_v2_0(nn.Module):
         loaded = set()
         missing = []
         unexpected = []
-
-        # # 1) buffers
-        # for n in self._BUFFER_NAMES:
-        #     if n in sd:
-        #         v = jt.array(_to_numpy_any(sd[n])).astype(self.dtype)
-        #         if (n != "logvar") or (not self.learn_logvar):
-        #             v.stop_grad()
-        #         setattr(self, n, v)
-        #         loaded.add(n)
-        #     else:
-        #         if strict:
-        #             missing.append(n)
-
-        # 2) diffuser params by prefix
         for dname, dmod in self.diffuser.items():
             prefix = f"diffuser.{dname}."
             sub = {}

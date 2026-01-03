@@ -47,18 +47,11 @@ class template_scheduler(object):
         raise ValueError
 
     def set_lr(self, optim, new_lr, pg_lrscale=None):
-        """
-        Jittor Optimizer:
-          - optim.lr 是全局 lr
-          - optim.param_groups 是 list[dict]，dict 可含 "lr" 字段
-        """
         pg_lrscale = copy.deepcopy(pg_lrscale)
 
-        # 先设置全局 lr（当 param_group 不带 "lr" 时会用 optim.lr）
         if hasattr(optim, "lr"):
             optim.lr = float(new_lr)
 
-        # 再设置各 param_groups（如果存在）
         pgs = getattr(optim, "param_groups", None)
         if not pgs:
             return
